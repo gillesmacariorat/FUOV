@@ -1,0 +1,227 @@
+//version 11/02/2026  crypto 2026
+//base field
+//extension degrees:
+p:=31; e:=61; // level 1
+//p:=61; e:=89; //level 3
+//p:=61; e:=127; //level 5
+assert IsPrime(p) and IsPrime(e);
+
+o:=1; //oil variables
+v:=4; //vinegar variables
+n:= o + v; //total variables;
+ell:=5; //number of Frobenius block per equation
+
+nbtests1:=100; //key generation
+nbtests2:=100; //signature
+nbtests3:=100; //verification
+
+
+//exponents of Frobenius forms
+//possible differences ranging from [e/2] to [e/2] - 2*o*ell + 1
+expo:=[ [ [ 0 : i in [1..ell]] , [ e div 2 + 1 - i - (z-1) * ell : i in [1..ell]] ] : z in [1..o]];
+
+//eliminating doubles
+U:=[0..e-1];
+for z in [1..o] do;
+for i:=1 to ell do;
+for j in [0..e-1] do;
+	a:= (expo[z][1][i] + j ) mod e; b:= (expo[z][2][i] + j ) mod e;
+	if a in U and b in U then
+		expo[z][1][i] := a;
+		expo[z][2][i] := b;
+		Exclude(~U,a);
+		Exclude(~U,b);
+		break;
+	end if;
+end for;
+end for;
+end for;
+
+expo;
+
+expo1:=&cat[ &cat u : u in expo];
+
+//no double ?
+assert #SequenceToSet(expo1) eq 2*ell*o;
+
+
+for z in [1..o] do;
+for j in [1,2] do;
+for i:=1 to ell do;
+expo[z][j][i] := Index(expo1,expo[z][j][i]);
+end for;
+end for;
+end for;
+
+
+//base field
+F:=GF(p);
+//extension field
+G<g>:=ext<F|e>;
+
+//vector space structure
+V,phi:=VectorSpace(G,F);
+psi:=phi^-1;
+BV:=Basis(V);
+
+//matrices of Frobenius
+MatFR:=Matrix([ phi( psi(b)^p ) : b in BV ]);
+FRs:=[ MatFR^i : i in expo1 ];
+
+//power p^(expo1[a])
+fr:=function(x,a);
+return psi( phi(x) * FRs[a] );
+end function;
+
+//multiplication by basis vectors
+MultB:= [Matrix([ phi ( psi(b) * psi(b1) ) : b in BV]) : b1 in BV];
+
+//multiplication forms 
+Mults:= [Transpose(m) : m in MultB];
+Mults:= [ Matrix([m[i] : m in Mults]) : i in [1..e]];
+
+
+"Key generation start";
+start_time:=Cputime();
+for test:=1 to nbtests1 do;
+
+//secret key
+L:=Matrix(G,o,v,[Random(G): i in [1..o*v]]);
+//Frobenius of secret key
+Ls:=[ Matrix(G,o,v,[ fr(l,a) : l in Eltseq(L)]) : a in [1..2*o*ell]];
+//"secret key", L;
+
+//blocks of public key
+M1:=[ [ Matrix(G,o,v,[Random(G): i in [1..o*v]])
+: k in [1..ell]]
+: z in [1..o]];
+M2:=[ [ Matrix(G,v,o,[Random(G): i in [1..v*o]])
+: k in [1..ell]]
+: z in [1..o]];
+M3:=[ [ Matrix(G,v,v,[Random(G): i in [1..v*v]])
+: k in [1..ell]]
+: z in [1..o]];
+
+//constraint part
+M0:=
+[ [
+    Ls[expo[z][1][k]] * 
+	( M3[z][k] * Transpose(Ls[expo[z][2][k]]) 
+		+  M2[z][k] )
+ + M1[z][k] * Transpose(Ls[expo[z][2][k]])
+: k in [1..ell]]
+: z in [1..o]];
+
+//assembly of public key
+MPub:=[ [
+VerticalJoin(
+HorizontalJoin( -M0[z][k], M1[z][k] ),
+HorizontalJoin( M2[z][k], M3[z][k] ))
+: k in [1..ell]]
+: z in [1..o]];
+
+//pre-computed part for signature 
+MLs:=
+[ [
+    [  
+        Transpose( Ls[expo[z][1][k]] * M3[z][k]  + M1[z][k] ), 
+        M3[z][k] * Transpose ( Ls[expo[z][2][k]] ) + M2[z][k]  
+     ]
+: k in [1..ell]]
+: z in [1..o]];
+
+end for;
+//"public key", MPub;
+"Key generation",Cputime(start_time)*1000/nbtests1;
+
+
+//sanity check
+assert &and[ 
+IsZero(
+HorizontalJoin(ScalarMatrix(G,o,One(G)),Ls[expo[z][1][k]])
+ * MPub[z][k] 
+* Transpose(HorizontalJoin(ScalarMatrix(G,o,One(G)),Ls[expo[z][2][k]])))
+: z in [1..o], k in [1..ell]];
+
+
+"Signature start";
+start_time:=Cputime();
+for test:=1 to nbtests2 do;
+//hash
+h:=[ Random(G) : i in [1..o]];
+
+retry:=0;
+repeat //until system is full rank
+
+//vinegar
+vinaigre:=[ Random(G) : i in [1..v]];
+//frobenius
+vs:=[ Vector([ fr(l,a) : l in vinaigre]) : a in [1..2*o*ell]];
+
+//constant part of system
+Gamma:=[ h[z] - &+[ ( vs[expo[z][1][k]]*M3[z][k] , vs[expo[z][2][k]]) 
+: k in [1..ell]]
+: z in [1..o]];
+
+//linear part of system 
+
+ML:=
+[ [
+    [  
+       vs[expo[z][2][k]] * MLs[z][k][1], 
+       vs[expo[z][1][k]] * MLs[z][k][2] 
+     ]
+: k in [1..ell]]
+: z in [1..o]];
+
+//ML;
+
+//conversion into Fp
+//constant part
+Gammap:=Vector( &cat[ Eltseq(phi(u)) : u in Gamma] );
+//linear part
+//init
+MLp:=ZeroMatrix(F,o*e,o*e); 
+
+for i,j in [1..o] do; //i : equation, j variable
+A:=ZeroMatrix(F,e,e);
+for k in [1..ell] do; //k Frobenius block
+for z in [1..2] do; // z 1 = left, 2 = right
+alpha:=ML[i][k][z][j]; //coefficient of jth var in ith equation
+aa:=phi(alpha);
+A+:=FRs[expo[i][z][k]]*&+[ aa[i] * MultB[i] : i in [1..e]];
+end for;
+end for;
+InsertBlock(~MLp,A,(j-1)*e+1,(i-1)*e+1);
+end for;
+
+res,X0,ker:=IsConsistent(MLp,Gammap);
+retry+:=1;
+until res and Dimension(ker) eq 0;
+//"retry",retry;
+sign:=Vector([ psi(u) : u in Partition(Eltseq(X0),e) ])
+* HorizontalJoin(ScalarMatrix(G,o,One(G)),L)
++ Vector( [G|0: i in [1..o]] cat vinaigre );
+//MLp;
+end for;
+"Signature",Cputime(start_time)*1000/nbtests2;
+
+
+//verif 
+"Verification start";
+start_time:=Cputime();
+for test:=1 to nbtests3 do;
+
+signs:=[ Vector([ fr(l,a) : l in Eltseq(sign)]) : a in [1..2*o*ell]];
+
+assert [ &+[ (signs[expo[z][1][k]]*MPub[z][k],signs[expo[z][2][k]])
+: k in [1..ell]]
+: z in [1..o]]
+eq h;
+end for;
+"Verification",Cputime(start_time)*1000/nbtests3;
+
+"OK";
+
+
+
