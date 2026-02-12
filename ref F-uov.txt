@@ -1,6 +1,5 @@
-//version 11/02/2026  crypto 2026
-//base field
-//extension degrees:
+//version 2026/12/02  crypto 2026
+//base field , extension degrees:
 p:=31; e:=61; // level 1
 //p:=61; e:=89; //level 3
 //p:=61; e:=127; //level 5
@@ -11,10 +10,7 @@ v:=4; //vinegar variables
 n:= o + v; //total variables;
 ell:=5; //number of Frobenius block per equation
 
-nbtests1:=100; //key generation
-nbtests2:=100; //signature
-nbtests3:=100; //verification
-
+nbtests:=300; 
 
 //exponents of Frobenius forms
 //possible differences ranging from [e/2] to [e/2] - 2*o*ell + 1
@@ -80,13 +76,19 @@ MultB:= [Matrix([ phi ( psi(b) * psi(b1) ) : b in BV]) : b1 in BV];
 Mults:= [Transpose(m) : m in MultB];
 Mults:= [ Matrix([m[i] : m in Mults]) : i in [1..e]];
 
+SaveMPub:=[ [[ZeroMatrix(G,n,n) : i in [1..ell]]: j in [1..o]] : k in [1..nbtests]];
+SaveM3:=[ [[ZeroMatrix(G,v,v) : i in [1..ell]]: j in [1..o]] : k in [1..nbtests]];
+SaveML:=[ [[[ZeroMatrix(G,v,o),ZeroMatrix(G,v,o)] : i in [1..ell]]: j in [1..o]] : k in [1..nbtests]];
+SaveL:=[ ZeroMatrix(G,o,v) : i in [1..nbtests]];
+
 
 "Key generation start";
 start_time:=Cputime();
-for test:=1 to nbtests1 do;
+for test:=1 to nbtests do;
 
 //secret key
 L:=Matrix(G,o,v,[Random(G): i in [1..o*v]]);
+SaveL[test]:=L;
 //Frobenius of secret key
 Ls:=[ Matrix(G,o,v,[ fr(l,a) : l in Eltseq(L)]) : a in [1..2*o*ell]];
 //"secret key", L;
@@ -101,6 +103,9 @@ M2:=[ [ Matrix(G,v,o,[Random(G): i in [1..v*o]])
 M3:=[ [ Matrix(G,v,v,[Random(G): i in [1..v*v]])
 : k in [1..ell]]
 : z in [1..o]];
+
+SaveM3[test]:=M3;
+
 
 //constraint part
 M0:=
@@ -120,6 +125,8 @@ HorizontalJoin( M2[z][k], M3[z][k] ))
 : k in [1..ell]]
 : z in [1..o]];
 
+SaveMPub[test]:=MPub;
+
 //pre-computed part for signature 
 MLs:=
 [ [
@@ -130,9 +137,11 @@ MLs:=
 : k in [1..ell]]
 : z in [1..o]];
 
+SaveML[test]:=MLs;
+
 end for;
 //"public key", MPub;
-"Key generation",Cputime(start_time)*1000/nbtests1;
+"Key generation",Cputime(start_time)*1000/nbtests;
 
 
 //sanity check
@@ -143,20 +152,28 @@ HorizontalJoin(ScalarMatrix(G,o,One(G)),Ls[expo[z][1][k]])
 * Transpose(HorizontalJoin(ScalarMatrix(G,o,One(G)),Ls[expo[z][2][k]])))
 : z in [1..o], k in [1..ell]];
 
+SaveSignature:=[Vector([G|0 : i in [1..n]]) : i in [1..nbtests]];
+SaveHash:=[[G|0 : i in [1..o]] : i in [1..nbtests]];
+
 
 "Signature start";
 start_time:=Cputime();
-for test:=1 to nbtests2 do;
+for test:=1 to nbtests do;
 //hash
 h:=[ Random(G) : i in [1..o]];
+
+SaveHash[test]:=h;
+MLs:=SaveML[test];
+L:=SaveL[test];
+M3:=SaveM3[test];
 
 retry:=0;
 repeat //until system is full rank
 
 //vinegar
-vinaigre:=[ Random(G) : i in [1..v]];
+vinegar:=[ Random(G) : i in [1..v]];
 //frobenius
-vs:=[ Vector([ fr(l,a) : l in vinaigre]) : a in [1..2*o*ell]];
+vs:=[ Vector([ fr(l,a) : l in vinegar]) : a in [1..2*o*ell]];
 
 //constant part of system
 Gamma:=[ h[z] - &+[ ( vs[expo[z][1][k]]*M3[z][k] , vs[expo[z][2][k]]) 
@@ -164,6 +181,7 @@ Gamma:=[ h[z] - &+[ ( vs[expo[z][1][k]]*M3[z][k] , vs[expo[z][2][k]])
 : z in [1..o]];
 
 //linear part of system 
+
 
 ML:=
 [ [
@@ -201,16 +219,21 @@ until res and Dimension(ker) eq 0;
 //"retry",retry;
 sign:=Vector([ psi(u) : u in Partition(Eltseq(X0),e) ])
 * HorizontalJoin(ScalarMatrix(G,o,One(G)),L)
-+ Vector( [G|0: i in [1..o]] cat vinaigre );
++ Vector( [G|0: i in [1..o]] cat vinegar );
 //MLp;
+SaveSignature[test]:=sign;
 end for;
-"Signature",Cputime(start_time)*1000/nbtests2;
+"Signature",Cputime(start_time)*1000/nbtests;
 
 
 //verif 
 "Verification start";
 start_time:=Cputime();
-for test:=1 to nbtests3 do;
+for test:=1 to nbtests do;
+
+MPub:=SaveMPub[test];
+sign:=SaveSignature[test];
+h:=SaveHash[test];
 
 signs:=[ Vector([ fr(l,a) : l in Eltseq(sign)]) : a in [1..2*o*ell]];
 
@@ -219,7 +242,7 @@ assert [ &+[ (signs[expo[z][1][k]]*MPub[z][k],signs[expo[z][2][k]])
 : z in [1..o]]
 eq h;
 end for;
-"Verification",Cputime(start_time)*1000/nbtests3;
+"Verification",Cputime(start_time)*1000/nbtests;
 
 "OK";
 
