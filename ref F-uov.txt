@@ -1,4 +1,4 @@
-//version 2026/12/02  crypto 2026
+//version 2026/06/05  asiacrypt 2026 
 //base field , extension degrees:
 p:=31; e:=61; // level 1
 //p:=61; e:=89; //level 3
@@ -10,7 +10,7 @@ v:=4; //vinegar variables
 n:= o + v; //total variables;
 ell:=5; //number of Frobenius block per equation
 
-nbtests:=300; 
+nbtests:=1000; 
 
 //exponents of Frobenius forms
 //possible differences ranging from [e/2] to [e/2] - 2*o*ell + 1
@@ -206,8 +206,7 @@ A:=ZeroMatrix(F,e,e);
 for k in [1..ell] do; //k Frobenius block
 for z in [1..2] do; // z 1 = left, 2 = right
 alpha:=ML[i][k][z][j]; //coefficient of jth var in ith equation
-aa:=phi(alpha);
-A+:=FRs[expo[i][z][k]]*&+[ aa[i] * MultB[i] : i in [1..e]];
+A+:=Matrix( [ phi ( alpha * psi( b*FRs[expo[i][z][k]]) ) : b in BV ] );
 end for;
 end for;
 InsertBlock(~MLp,A,(j-1)*e+1,(i-1)*e+1);
@@ -245,6 +244,5 @@ end for;
 "Verification",Cputime(start_time)*1000/nbtests;
 
 "OK";
-
 
 
