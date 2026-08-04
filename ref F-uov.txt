@@ -1,248 +1,609 @@
-//version 2026/06/05  asiacrypt 2026 
-//base field , extension degrees:
-p:=31; e:=61; // level 1
-//p:=61; e:=89; //level 3
-//p:=61; e:=127; //level 5
+///////////////////////////////////////////////////////////////////////////
+// UFOs / F-UOV reference implementation (cleaned and commented version)
+//
+// This script is aligned with the mathematical notation of Document 1.
+// In particular, the public Frobenius blocks are written as
+//
+//    Pub_k(X) = X^[a_k] * A_k * tX^[b_k]
+//
+// with the explicit exponent pairs (a_k,b_k) taken from the parameter tables.
+//
+// Specialized regime implemented here:
+//    o = m = 1, v = 4, n = 5, ell = 5
+//
+// Main phases:
+//   1. Key generation
+//   2. Signing
+//   3. Verification
+//
+// The code also contains a sanity check for the isotropy condition
+//    Lambda^[a_k] * A_k * tLambda^[b_k] = 0
+// for every block k.
+//
+// Notation in code vs paper:
+//   L      = Lambda^*  (tail of the secret oil basis Lambda = (1 | Lambda^*))
+//   M0     = oil-oil block A_{0,k}, reconstructed from isotropy
+//   M1,M2,M3 = remaining blocks of A_k
+//   MPub   = full public matrices A_k
+//   MLs    = precomputed matrices used in the signing linearization
+///////////////////////////////////////////////////////////////////////////
+
+
+nbtests := 300;
+
+
+//////////////////////////////
+// Parameters
+//////////////////////////////
+
+o := 1;          // oil dimension
+v := 4;          // vinegar dimension
+n := o + v;      // total dimension
+ell := 5;        // number of Frobenius blocks
+
+//////////////////////////////
+// Exponent schedule (Document 1, Tables 3 / 6)
+//////////////////////////////
+// Level I:
+//   (a1,b1)=(0,9)
+//   (a2,b2)=(7,54)
+//   (a3,b3)=(13,29)
+//   (a4,b4)=(15,37)
+//   (a5,b5)=(35,47)
+//
+// To switch to Level III or V, replace level below accordingly.
+level := 1; // change for 1 3 or 5
+
+// definition of Schedule, p and e according to level
+if level eq 1 then
+    // Level I
+    p := 31;
+    e := 61;
+    a := [0, 7, 13, 15, 35];
+    b := [9, 54, 29, 37, 47];
+elif level eq 3 then
+    // Level III
+    p := 61;
+    e := 89;
+    a := [0, 28, 40, 52, 53];
+    b := [13, 43, 61, 84, 76];
+elif level eq 5 then
+    // Level V
+    p := 61;
+    e := 127;
+    a := [0, 22, 29, 53, 94];
+    b := [2, 83, 74, 79, 111];
+else
+    error "unrecognized level, choose level := 1, 3 or 5.";
+end if;
+
+
+assert #a eq ell and #b eq ell;
+assert &and[0 le x and x lt e : x in a];
+assert &and[0 le x and x lt e : x in b];
+
 assert IsPrime(p) and IsPrime(e);
 
-o:=1; //oil variables
-v:=4; //vinegar variables
-n:= o + v; //total variables;
-ell:=5; //number of Frobenius block per equation
 
-nbtests:=1000; 
+//////////////////////////////
+// Fields and coordinate maps
+//////////////////////////////
 
-//exponents of Frobenius forms
-//possible differences ranging from [e/2] to [e/2] - 2*o*ell + 1
-expo:=[ [ [ 0 : i in [1..ell]] , [ e div 2 + 1 - i - (z-1) * ell : i in [1..ell]] ] : z in [1..o]];
+F := GF(p);
+G<g> := ext<F | e>;
 
-//eliminating doubles
-U:=[0..e-1];
-for z in [1..o] do;
-for i:=1 to ell do;
-for j in [0..e-1] do;
-	a:= (expo[z][1][i] + j ) mod e; b:= (expo[z][2][i] + j ) mod e;
-	if a in U and b in U then
-		expo[z][1][i] := a;
-		expo[z][2][i] := b;
-		Exclude(~U,a);
-		Exclude(~U,b);
-		break;
-	end if;
-end for;
-end for;
-end for;
+V, phi := VectorSpace(G, F);
+psi := phi^-1;
+BV := Basis(V);
 
-expo;
+///////////////////////////////////////////////////////////////////////////
+// Frobenius linear algebra over F_p
+//
+// MatFR is the matrix of x -> x^p in the chosen F_p-basis of F_q.
+// Therefore MatFR^i is the matrix of x -> x^(p^i).
+///////////////////////////////////////////////////////////////////////////
 
-expo1:=&cat[ &cat u : u in expo];
+MatFR := Matrix([ phi(psi(b)^p) : b in BV ]);
+FrobMats := [ MatFR^i : i in [0..e-1] ];
 
-//no double ?
-assert #SequenceToSet(expo1) eq 2*ell*o;
-
-
-for z in [1..o] do;
-for j in [1,2] do;
-for i:=1 to ell do;
-expo[z][j][i] := Index(expo1,expo[z][j][i]);
-end for;
-end for;
-end for;
-
-
-//base field
-F:=GF(p);
-//extension field
-G<g>:=ext<F|e>;
-
-//vector space structure
-V,phi:=VectorSpace(G,F);
-psi:=phi^-1;
-BV:=Basis(V);
-
-//matrices of Frobenius
-MatFR:=Matrix([ phi( psi(b)^p ) : b in BV ]);
-FRs:=[ MatFR^i : i in expo1 ];
-
-//power p^(expo1[a])
-fr:=function(x,a);
-return psi( phi(x) * FRs[a] );
+Frob := function(x, i)
+    // Returns x^[i] = x^(p^i), with i interpreted modulo e.
+    return psi(phi(x) * FrobMats[(i mod e) + 1]);
 end function;
 
-//multiplication by basis vectors
-MultB:= [Matrix([ phi ( psi(b) * psi(b1) ) : b in BV]) : b1 in BV];
 
-//multiplication forms 
-Mults:= [Transpose(m) : m in MultB];
-Mults:= [ Matrix([m[i] : m in Mults]) : i in [1..e]];
+//////////////////////////////
+// Storage for timings / tests
+//////////////////////////////
 
-SaveMPub:=[ [[ZeroMatrix(G,n,n) : i in [1..ell]]: j in [1..o]] : k in [1..nbtests]];
-SaveM3:=[ [[ZeroMatrix(G,v,v) : i in [1..ell]]: j in [1..o]] : k in [1..nbtests]];
-SaveML:=[ [[[ZeroMatrix(G,v,o),ZeroMatrix(G,v,o)] : i in [1..ell]]: j in [1..o]] : k in [1..nbtests]];
-SaveL:=[ ZeroMatrix(G,o,v) : i in [1..nbtests]];
+SaveMPub := [ [ ZeroMatrix(G, n, n) : k in [1..ell] ] : t in [1..nbtests] ];
+SaveM3   := [ [ ZeroMatrix(G, v, v) : k in [1..ell] ] : t in [1..nbtests] ];
+SaveML   := [ [ [ ZeroMatrix(G, v, o), ZeroMatrix(G, v, o) ] : k in [1..ell] ] : t in [1..nbtests] ];
+SaveL    := [ ZeroMatrix(G, o, v) : t in [1..nbtests] ];
 
+SaveSignature := [ Vector([ G | 0 : i in [1..n] ]) : t in [1..nbtests] ];
+SaveHash      := [ [ G | 0 : i in [1..o] ] : t in [1..nbtests] ];
+
+
+///////////////////////////////////////////////////////////////////////////
+// 1. Key generation
+//
+// We sample Lambda^*, then for each block k sample A1_k, A2_k, A3_k,
+// and reconstruct A0_k from the isotropy condition
+//
+//    Lambda^[a_k] * A_k * tLambda^[b_k] = 0
+//
+// which matches Equation (9) of Document 1.
+///////////////////////////////////////////////////////////////////////////
 
 "Key generation start";
-start_time:=Cputime();
-for test:=1 to nbtests do;
+start_time := Cputime();
 
-//secret key
-L:=Matrix(G,o,v,[Random(G): i in [1..o*v]]);
-SaveL[test]:=L;
-//Frobenius of secret key
-Ls:=[ Matrix(G,o,v,[ fr(l,a) : l in Eltseq(L)]) : a in [1..2*o*ell]];
-//"secret key", L;
+for test := 1 to nbtests do
 
-//blocks of public key
-M1:=[ [ Matrix(G,o,v,[Random(G): i in [1..o*v]])
-: k in [1..ell]]
-: z in [1..o]];
-M2:=[ [ Matrix(G,v,o,[Random(G): i in [1..v*o]])
-: k in [1..ell]]
-: z in [1..o]];
-M3:=[ [ Matrix(G,v,v,[Random(G): i in [1..v*v]])
-: k in [1..ell]]
-: z in [1..o]];
+    //////////////////////////////////////////////////////
+    // Secret key: Lambda^* in F_q^{o x v}
+    //////////////////////////////////////////////////////
+    L := Matrix(G, o, v, [ Random(G) : i in [1..o*v] ]);
+    SaveL[test] := L;
 
-SaveM3[test]:=M3;
+    // Frobenius images Lambda^[a_k] and Lambda^[b_k]
+    La := [ Matrix(G, o, v, [ Frob(x, a[k]) : x in Eltseq(L) ]) : k in [1..ell] ];
+    Lb := [ Matrix(G, o, v, [ Frob(x, b[k]) : x in Eltseq(L) ]) : k in [1..ell] ];
 
+    //////////////////////////////////////////////////////
+    // Public block decomposition:
+    //
+    //   A_k = [ A0_k  A1_k ]
+    //         [ A2_k  A3_k ]
+    //
+    // Here:
+    //   M1[k] = A1_k  (o x v)
+    //   M2[k] = A2_k  (v x o)
+    //   M3[k] = A3_k  (v x v)
+    //////////////////////////////////////////////////////
+    M1 := [ Matrix(G, o, v, [ Random(G) : i in [1..o*v] ]) : k in [1..ell] ];
+    M2 := [ Matrix(G, v, o, [ Random(G) : i in [1..v*o] ]) : k in [1..ell] ];
+    M3 := [ Matrix(G, v, v, [ Random(G) : i in [1..v*v] ]) : k in [1..ell] ];
 
-//constraint part
-M0:=
-[ [
-    Ls[expo[z][1][k]] * 
-	( M3[z][k] * Transpose(Ls[expo[z][2][k]]) 
-		+  M2[z][k] )
- + M1[z][k] * Transpose(Ls[expo[z][2][k]])
-: k in [1..ell]]
-: z in [1..o]];
+    SaveM3[test] := M3;
 
-//assembly of public key
-MPub:=[ [
-VerticalJoin(
-HorizontalJoin( -M0[z][k], M1[z][k] ),
-HorizontalJoin( M2[z][k], M3[z][k] ))
-: k in [1..ell]]
-: z in [1..o]];
+    //////////////////////////////////////////////////////
+    // Recover the missing oil-oil block A0_k.
+    //
+    // With the sign convention of the paper:
+    //
+    //   A0_k = - Lambda^[a_k] * ( A3_k * tLambda^[b_k] + A2_k )
+    //          - A1_k * tLambda^[b_k]
+    //
+    // Since MPub is assembled with -M0 in the top-left corner,
+    // the quantity below is the positive expression before insertion.
+    //////////////////////////////////////////////////////
+    M0 := [
+        La[k] * ( M3[k] * Transpose(Lb[k]) + M2[k] ) + M1[k] * Transpose(Lb[k])
+        : k in [1..ell]
+    ];
 
-SaveMPub[test]:=MPub;
+    //////////////////////////////////////////////////////
+    // Assemble the full public matrices A_k
+    //////////////////////////////////////////////////////
+    MPub := [
+        VerticalJoin(
+            HorizontalJoin( -M0[k], M1[k] ),
+            HorizontalJoin(  M2[k], M3[k] )
+        )
+        : k in [1..ell]
+    ];
 
-//pre-computed part for signature 
-MLs:=
-[ [
-    [  
-        Transpose( Ls[expo[z][1][k]] * M3[z][k]  + M1[z][k] ), 
-        M3[z][k] * Transpose ( Ls[expo[z][2][k]] ) + M2[z][k]  
-     ]
-: k in [1..ell]]
-: z in [1..o]];
+    SaveMPub[test] := MPub;
 
-SaveML[test]:=MLs;
+    //////////////////////////////////////////////////////
+    // Precompute the matrices appearing in the signing
+    // linearization; this matches Equation (11) in the paper.
+    //////////////////////////////////////////////////////
+    MLs := [
+        [
+            Transpose( La[k] * M3[k] + M1[k] ),
+            M3[k] * Transpose(Lb[k]) + M2[k]
+        ]
+        : k in [1..ell]
+    ];
+
+    SaveML[test] := MLs;
 
 end for;
-//"public key", MPub;
-"Key generation",Cputime(start_time)*1000/nbtests;
+
+"Key generation", Cputime(start_time)*1000/nbtests;
 
 
-//sanity check
-assert &and[ 
-IsZero(
-HorizontalJoin(ScalarMatrix(G,o,One(G)),Ls[expo[z][1][k]])
- * MPub[z][k] 
-* Transpose(HorizontalJoin(ScalarMatrix(G,o,One(G)),Ls[expo[z][2][k]])))
-: z in [1..o], k in [1..ell]];
+///////////////////////////////////////////////////////////////////////////
+// Sanity check:
+//
+// For every block k, the secret oil line generated by
+//   Lambda = (1 | Lambda^*)
+// must be totally isotropic:
+//   Lambda^[a_k] * A_k * tLambda^[b_k] = 0.
+///////////////////////////////////////////////////////////////////////////
 
-SaveSignature:=[Vector([G|0 : i in [1..n]]) : i in [1..nbtests]];
-SaveHash:=[[G|0 : i in [1..o]] : i in [1..nbtests]];
+for test := 1 to nbtests do
+    L := SaveL[test];
+    MPub := SaveMPub[test];
 
+    La := [ Matrix(G, o, v, [ Frob(x, a[k]) : x in Eltseq(L) ]) : k in [1..ell] ];
+    Lb := [ Matrix(G, o, v, [ Frob(x, b[k]) : x in Eltseq(L) ]) : k in [1..ell] ];
+
+    assert &and[
+        IsZero(
+            HorizontalJoin(ScalarMatrix(G, o, One(G)), La[k])
+            * MPub[k]
+            * Transpose(HorizontalJoin(ScalarMatrix(G, o, One(G)), Lb[k]))
+        )
+        : k in [1..ell]
+    ];
+end for;
+
+
+///////////////////////////////////////////////////////////////////////////
+// 2. Signing
+//
+// We sample a vinegar vector V = (0 | V^*), compute Gamma = h - Pub(V),
+// and solve the induced F_p-linear system in the oil variable X.
+//
+// In the regime o = m = 1, this is an e x e linear system over F_p.
+///////////////////////////////////////////////////////////////////////////
 
 "Signature start";
-start_time:=Cputime();
-for test:=1 to nbtests do;
-//hash
-h:=[ Random(G) : i in [1..o]];
+start_time := Cputime();
 
-SaveHash[test]:=h;
-MLs:=SaveML[test];
-L:=SaveL[test];
-M3:=SaveM3[test];
+for test := 1 to nbtests do
 
-retry:=0;
-repeat //until system is full rank
+    h := [ Random(G) : i in [1..o] ];
+    SaveHash[test] := h;
 
-//vinegar
-vinegar:=[ Random(G) : i in [1..v]];
-//frobenius
-vs:=[ Vector([ fr(l,a) : l in vinegar]) : a in [1..2*o*ell]];
+    MLs := SaveML[test];
+    L   := SaveL[test];
+    M3  := SaveM3[test];
 
-//constant part of system
-Gamma:=[ h[z] - &+[ ( vs[expo[z][1][k]]*M3[z][k] , vs[expo[z][2][k]]) 
-: k in [1..ell]]
-: z in [1..o]];
+    retry := 0;
 
-//linear part of system 
+    repeat
 
+        //////////////////////////////////////////////////
+        // Vinegar vector V = (0 | V^*)
+        //////////////////////////////////////////////////
+        vinegar := [ Random(G) : i in [1..v] ];
 
-ML:=
-[ [
-    [  
-       vs[expo[z][2][k]] * MLs[z][k][1], 
-       vs[expo[z][1][k]] * MLs[z][k][2] 
-     ]
-: k in [1..ell]]
-: z in [1..o]];
+        Va := [ Vector([ Frob(x, a[k]) : x in vinegar ]) : k in [1..ell] ];
+        Vb := [ Vector([ Frob(x, b[k]) : x in vinegar ]) : k in [1..ell] ];
 
-//ML;
+        //////////////////////////////////////////////////
+        // Constant term Gamma = h - Pub(V)
+        //
+        // Since V has zero oil part, only the A3_k block contributes.
+        //////////////////////////////////////////////////
+        Gamma := [
+            h[z] - &+[ (Va[k] * M3[k], Vb[k]) : k in [1..ell] ]
+            : z in [1..o]
+        ];
 
-//conversion into Fp
-//constant part
-Gammap:=Vector( &cat[ Eltseq(phi(u)) : u in Gamma] );
-//linear part
-//init
-MLp:=ZeroMatrix(F,o*e,o*e); 
+        //////////////////////////////////////////////////
+        // Linear part in the oil variable X
+        //////////////////////////////////////////////////
+        ML := [
+            [
+                Vb[k] * MLs[k][1],
+                Va[k] * MLs[k][2]
+            ]
+            : k in [1..ell]
+        ];
 
-for i,j in [1..o] do; //i : equation, j variable
-A:=ZeroMatrix(F,e,e);
-for k in [1..ell] do; //k Frobenius block
-for z in [1..2] do; // z 1 = left, 2 = right
-alpha:=ML[i][k][z][j]; //coefficient of jth var in ith equation
-A+:=Matrix( [ phi ( alpha * psi( b*FRs[expo[i][z][k]]) ) : b in BV ] );
+        //////////////////////////////////////////////////
+        // Descent to F_p:
+        // build the matrix of the F_p-linear map X -> Pub(X Lambda + V)-Pub(V)
+        //////////////////////////////////////////////////
+        Gammap := Vector(&cat[ Eltseq(phi(u)) : u in Gamma ]);
+        MLp := ZeroMatrix(F, o*e, o*e);
+
+        for i, j in [1..o] do
+            Ablock := ZeroMatrix(F, e, e);
+
+            for k in [1..ell] do
+                // Left contribution: coefficient times x^[a_k]
+                alphaL := ML[k][1][j];
+                Ablock +:= Matrix([
+                    phi(alphaL * psi(basisElt * FrobMats[a[k] + 1]))
+                    : basisElt in BV
+                ]);
+
+                // Right contribution: coefficient times x^[b_k]
+                alphaR := ML[k][2][j];
+                Ablock +:= Matrix([
+                    phi(alphaR * psi(basisElt * FrobMats[b[k] + 1]))
+                    : basisElt in BV
+                ]);
+            end for;
+
+            InsertBlock(~MLp, Ablock, (j-1)*e+1, (i-1)*e+1);
+        end for;
+
+        //////////////////////////////////////////////////
+        // Solve the F_p-linear system
+        //////////////////////////////////////////////////
+        res, X0, ker := IsConsistent(MLp, Gammap);
+        retry +:= 1;
+
+    until res and Dimension(ker) eq 0;
+
+    //////////////////////////////////////////////////////
+    // Reconstruct Sigma = X Lambda + V
+    //////////////////////////////////////////////////////
+    sign := Vector([ psi(u) : u in Partition(Eltseq(X0), e) ])
+            * HorizontalJoin(ScalarMatrix(G, o, One(G)), L)
+            + Vector([ G | 0 : i in [1..o] ] cat vinegar);
+
+    SaveSignature[test] := sign;
+
 end for;
-end for;
-InsertBlock(~MLp,A,(j-1)*e+1,(i-1)*e+1);
-end for;
 
-res,X0,ker:=IsConsistent(MLp,Gammap);
-retry+:=1;
-until res and Dimension(ker) eq 0;
-//"retry",retry;
-sign:=Vector([ psi(u) : u in Partition(Eltseq(X0),e) ])
-* HorizontalJoin(ScalarMatrix(G,o,One(G)),L)
-+ Vector( [G|0: i in [1..o]] cat vinegar );
-//MLp;
-SaveSignature[test]:=sign;
-end for;
-"Signature",Cputime(start_time)*1000/nbtests;
+"Signature", Cputime(start_time)*1000/nbtests;
 
 
-//verif 
+///////////////////////////////////////////////////////////////////////////
+// 3. Verification
+//
+// Check that
+//   sum_k Sigma^[a_k] * A_k * tSigma^[b_k] = h.
+///////////////////////////////////////////////////////////////////////////
+
 "Verification start";
-start_time:=Cputime();
-for test:=1 to nbtests do;
+start_time := Cputime();
 
-MPub:=SaveMPub[test];
-sign:=SaveSignature[test];
-h:=SaveHash[test];
+for test := 1 to nbtests do
 
-signs:=[ Vector([ fr(l,a) : l in Eltseq(sign)]) : a in [1..2*o*ell]];
+    MPub := SaveMPub[test];
+    sign := SaveSignature[test];
+    h    := SaveHash[test];
 
-assert [ &+[ (signs[expo[z][1][k]]*MPub[z][k],signs[expo[z][2][k]])
-: k in [1..ell]]
-: z in [1..o]]
-eq h;
+    signA := [ Vector([ Frob(x, a[k]) : x in Eltseq(sign) ]) : k in [1..ell] ];
+    signB := [ Vector([ Frob(x, b[k]) : x in Eltseq(sign) ]) : k in [1..ell] ];
+
+    assert [
+        &+[ (signA[k] * MPub[k], signB[k]) : k in [1..ell] ]
+    ] eq h;
+
 end for;
-"Verification",Cputime(start_time)*1000/nbtests;
+
+"Verification", Cputime(start_time)*1000/nbtests;
 
 "OK";
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+///////////////////////////////////////////
+// Paramètres principaux
+p := 31; // ou 61 pour niveau III ou V
+e := 61; // ou 89 ou 127 selon le niveau
+assert IsPrime(p) and IsPrime(e);
+
+// Niveau choisi : 1, 3 ou 5
+level := 1; // changer ici pour 3 ou 5
+
+// Définition des schedules selon le niveau
+if level eq 1 then
+    // Niveau I
+    a := [0, 7, 13, 15, 35];
+    b := [9, 54, 29, 37, 47];
+elif level eq 3 then
+    // Niveau III
+    a := [0, 28, 40, 52, 53];
+    b := [13, 43, 61, 84, 76];
+elif level eq 5 then
+    // Niveau V
+    a := [0, 22, 29, 53, 94];
+    b := [2, 83, 74, 79, 111];
+else
+    error "Niveau non reconnu. Choisissez level := 1, 3 ou 5.";
+end if;
+
+assert #a eq 5 and #b eq 5;
+
+// Définir le nombre d'essais
+nbtests := 1000;
+
+// Construction des listes d'exposants (initialisation)
+expo := [ [ [0 : i in [1..ell]], [ e div 2 + 1 - i - (z-1)*ell : i in [1..ell]] ] : z in [1..o]];
+
+// Suppression des doublons et ajustement
+U := [0..e-1];
+for z in [1..o] do
+    for i in [1..ell] do
+        for j in [0..e-1] do
+            a := (expo[z][1][i] + j) mod e;
+            b := (expo[z][2][i] + j) mod e;
+            if a in U and b in U then
+                expo[z][1][i] := a;
+                expo[z][2][i] := b;
+                Exclude(~U, a);
+                Exclude(~U, b);
+                break;
+            end if;
+        end for;
+    end for;
+end for;
+
+// Concatenate tous les exposants
+expo1 := &cat[ &cat u : u in expo];
+
+// Vérification
+assert #SequenceToSet(expo1) eq 2*ell*o;
+
+// Remplacement par indices dans expo1
+for z in [1..o] do
+    for j in [1,2] do
+        for i in [1..ell] do
+            expo[z][j][i] := Index(expo1, expo[z][j][i]);
+        end for;
+    end for;
+end for;
+
+// Définition des champs
+F := GF(p);
+G<g> := ext<F | e>;
+
+// Vecteur espace et bases
+V, phi := VectorSpace(G, F);
+psi := phi^-1;
+BV := Basis(V);
+
+// Matrice Frobenius
+MatFR := Matrix([ phi(psi(b)^p) : b in BV ]);
+FRs := [MatFR^i : i in expo1];
+
+// Fonction Frobenius
+fr := function(x, a);
+    return psi(phi(x) * FRs[a]);
+end function;
+
+// Matrices de multiplication par base
+MultB := [Matrix([phi(psi(b) * psi(b1)) : b in BV]) : b1 in BV];
+Mults := [Transpose(m) : m in MultB];
+Mults := [Matrix([m[i] : m in Mults]) : i in [1..e]];
+
+// Initialisation des sauvegardes
+SaveMPub := [ [ [ ZeroMatrix(G, n, n) : i in [1..ell]] : j in [1..o]] : k in [1..nbtests] ];
+SaveM3 := [ [ [ ZeroMatrix(G, v, v) : i in [1..ell]] : j in [1..o]] : k in [1..nbtests] ];
+SaveML := [ [ [ [ ZeroMatrix(G, v, o), ZeroMatrix(G, v, o)] : i in [1..ell]] : j in [1..o]] : k in [1..nbtests] ];
+SaveL := [ ZeroMatrix(G, o, v) : i in [1..nbtests] ];
+
+// Début génération clé
+"Key generation start";
+start_time := Cputime();
+
+for test in [1..nbtests] do
+    // Clé secrète
+    L := Matrix(G, o, v, [Random(G) : i in [1..o*v]]);
+    SaveL[test] := L;
+
+    // Frobenius secret
+    Ls := [ Matrix(G, o, v, [fr(l, a) : l in Eltseq(L)]) : a in [1..2*o*ell]];
+
+    // Matrices de blocs publics
+    M1 := [ [ Matrix(G, o, v, [Random(G) : i in [1..o*v]]) : k in [1..ell]] : z in [1..o]];
+    M2 := [ [ Matrix(G, v, o, [Random(G) : i in [1..v*o]]) : k in [1..ell]] : z in [1..o]];
+    M3 := [ [ Matrix(G, v, v, [Random(G) : i in [1..v*v]]) : k in [1..ell]] : z in [1..o]];
+
+    SaveM3[test] := M3;
+
+    // Calcul de M0 via formule (9)
+    M0 := [ [ 
+        Ls[expo[z][1][k]] * (M3[z][k] * Transpose(Ls[expo[z][2][k]]) + M2[z][k]) + M1[z][k] * Transpose(Ls[expo[z][2][k]])
+        : k in [1..ell]
+        ] : z in [1..o]];
+
+    // Assemblage de la clé publique
+    MPub := [ [ VerticalJoin( HorizontalJoin(-M0[z][k], M1[z][k]), HorizontalJoin(M2[z][k], M3[z][k]) )
+                : k in [1..ell]] : z in [1..o] ];
+
+    SaveMPub[test] := MPub;
+
+    // Pré-calcul pour signature
+    MLs := [ [ [ Transpose(Ls[expo[z][1][k]]) * M3[z][k], M3[z][k] * Transpose(Ls[expo[z][2][k]]) ] : k in [1..ell]] : z in [1..o] ];
+    SaveML[test] := MLs;
+end for;
+
+"Key generation", Cputime(start_time);
+
+//////////////////////////////
+// Sanity check
+//////////////////////////////
+assert &and[ IsZero(HorizontalJoin(ScalarMatrix(G, o, One(G)), Ls[expo[z][1][k]])
+                     * MPub[z][k]
+                     * Transpose(HorizontalJoin(ScalarMatrix(G, o, One(G)), Ls[expo[z][2][k]])))
+             : z in [1..o], k in [1..ell]] ];
+
+//////////////////////////////
+// Signature
+//////////////////////////////
+"Signature start";
+start_time := Cputime();
+
+for test in [1..nbtests] do
+    // Hash
+    h := [ Random(G) : i in [1..o] ];
+    SaveHash[test] := h;
+
+    MLs := SaveML[test];
+    L := SaveL[test];
+    M3 := SaveM3[test];
+
+    retry := 0;
+    repeat
+        // Vinaigre
+        vinegar := [ Random(G) : i in [1..v] ];
+        // Frobenius
+        vs := [ Vector([ fr(l, a) : l in vinegar]) : a in [1..2*o*ell]];
+
+        // Partie constante
+        Gamma := [ h[z] - &+[ vs[expo[z][1][k]][i] * M3[z][k][i] * vs[expo[z][2][k]][i] : i in [1..v], k in [1..ell]] : z in [1..o]];
+
+        // Partie linéaire
+        ML := [ [ [ vs[expo[z][2][k]] * MLs[z][k][1], vs[expo[z][1][k]] * MLs[z][k][2] ] : k in [1..ell]] : z in [1..o]];
+
+        // Conversion en Fp
+        Gammap := Vector( &cat[ Eltseq(phi(u)) : u in Gamma ] );
+
+        MLp := ZeroMatrix(F, o*e, o*e);
+        for i in [1..o], j in [1..o] do
+            A := ZeroMatrix(F, e, e);
+            for k in [1..ell] do
+                for z in [1..2] do
+                    alpha := ML[i][k][z];
+                    A +:= Matrix([ phi( alpha * psi( b * FRs[expo[z][k]] ) ) : b in BV ]);
+                end for;
+            end for;
+            InsertBlock(~MLp, A, (j-1)*e+1, (i-1)*e+1);
+        end for;
+
+        // Résolution
+        res, X0, ker := IsConsistent(MLp, Gammap);
+        retry +:= 1;
+    until res and Dimension(ker) eq 0;
+
+    // Reconstitution de la signature
+    sign := psi(X0) * Vector([ G | 1 : i in [1..o]] ) + Vector([ G | 0 : i in [1..o]] cat vinegar );
+    SaveSignature[test] := sign;
+end for;
+
+"Signature", Cputime(start_time);
+
+//////////////////////////////
+// Vérification
+//////////////////////////////
+"Verification start";
+start_time := Cputime();
+
+for test in [1..nbtests] do
+    MPub := SaveMPub[test];
+    sign := SaveSignature[test];
+    h := SaveHash[test];
+
+    signs := [ Vector([ fr(l, a) : l in Eltseq(sign)]) : a in [1..2*o*ell]];
+
+    assert [ &+[ signs[expo[z][1][k]] * MPub[z][k] * signs[expo[z][2][k]] : k in [1..ell]] : z in [1..o]] eq h;
+end for;
+
+"Verification", Cputime(start_time);
+"OK";
 
